@@ -25,7 +25,13 @@ Perfect for TV shows, anime, documentaries, or any multi-part content.
 Place the script in the folder containing your MKV files and run:
 
 ```powershell
-.\concat.ps1
+.\script.ps1
+```
+
+You can also override the output file name:
+
+```powershell
+.\script.ps1 -OutputFile "Season 1.mkv"
 ```
 
 The script will:
