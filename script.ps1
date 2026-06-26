@@ -1,39 +1,71 @@
-# -----------------------------
-# 1️⃣ Create files.txt for FFmpeg concat (UTF-8 without BOM)
-# -----------------------------
-$utf8NoBOM = New-Object System.Text.UTF8Encoding($False)
-Get-ChildItem -Filter *.mkv | Sort-Object Name | ForEach-Object {
-    # Escape single quotes by doubling them
-    $escapedName = $_.Name -replace "'", "''"
-    "file '$escapedName'"
-} | Set-Content -LiteralPath .\files.txt -Encoding $utf8NoBOM
+[CmdletBinding()]
+param(
+    [string]$InputDirectory = (Get-Location).Path,
+    [string]$OutputFile = 'Kaamelott Livre II - Tome 2.mkv'
+)
 
-# -----------------------------
-# 2️⃣ Create chapters.txt with metadata (UTF-8 without BOM)
-# -----------------------------
-$files = Get-ChildItem -Filter *.mkv | Sort-Object Name
-$startTime = 0
-$metadata = ";FFMETADATA1`n"
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 
-foreach ($file in $files) {
-    # Get duration of the file in seconds
-    $info = ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$($file.FullName)"
-    $duration = [math]::Round([double]$info)
-    $endTime = $startTime + $duration
+function ConvertTo-FfMetadataValue {
+    param([Parameter(Mandatory)] [string]$Value)
 
-    # Escape '=' in title to avoid metadata parsing issues
-    $title = $file.BaseName -replace "=", "\="
-
-    # Add chapter entry
-    $metadata += "[CHAPTER]`nTIMEBASE=1/1`nSTART=$startTime`nEND=$endTime`ntitle=$title`n"
-
-    # Next chapter starts at the end of this one
-    $startTime = $endTime
+    $escaped = ($Value -replace "`r`n|`n|`r", ' ') -replace '([\\=;#])', '\\$1'
+    return $escaped
 }
 
-$metadata | Set-Content -LiteralPath .\chapters.txt -Encoding $utf8NoBOM
+function ConvertTo-FfConcatLine {
+    param([Parameter(Mandatory)] [string]$Path)
 
-# -----------------------------
-# 3️⃣ Merge all MKVs into one with chapters
-# -----------------------------
-ffmpeg -f concat -safe 0 -i files.txt -i chapters.txt -map_metadata 1 -c copy "Kaamelott Livre II - Tome 2.mkv"     
+    $escapedPath = ($Path -replace '\\', '/') -replace "'", "''"
+    return "file '$escapedPath'"
+}
+
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$files = Get-ChildItem -LiteralPath $InputDirectory -Filter *.mkv | Sort-Object Name
+
+if (-not $files) {
+    throw "No MKV files were found in '$InputDirectory'."
+}
+
+$concatLines = foreach ($file in $files) {
+    ConvertTo-FfConcatLine -Path $file.FullName
+}
+
+$tempDirectory = [System.IO.Path]::GetTempPath()
+$concatListPath = Join-Path $tempDirectory ([System.IO.Path]::GetRandomFileName() + '.txt')
+$chaptersPath = Join-Path $tempDirectory ([System.IO.Path]::GetRandomFileName() + '.txt')
+
+$chapterLines = New-Object System.Collections.Generic.List[string]
+$chapterLines.Add(';FFMETADATA1')
+$startTimeMs = 0
+
+foreach ($file in $files) {
+    $durationText = & ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 $file.FullName
+
+    if ([string]::IsNullOrWhiteSpace($durationText)) {
+        throw "Unable to read duration for '$($file.FullName)'."
+    }
+
+    $durationMs = [int][math]::Round(([double]$durationText) * 1000)
+    $endTimeMs = $startTimeMs + $durationMs
+    $chapterTitle = ConvertTo-FfMetadataValue -Value $file.BaseName
+
+    $chapterLines.Add('[CHAPTER]')
+    $chapterLines.Add('TIMEBASE=1/1000')
+    $chapterLines.Add("START=$startTimeMs")
+    $chapterLines.Add("END=$endTimeMs")
+    $chapterLines.Add("title=$chapterTitle")
+
+    $startTimeMs = $endTimeMs
+}
+
+try {
+    [System.IO.File]::WriteAllLines($concatListPath, $concatLines, $utf8NoBom)
+    [System.IO.File]::WriteAllLines($chaptersPath, $chapterLines, $utf8NoBom)
+
+    & ffmpeg -y -f concat -safe 0 -i $concatListPath -i $chaptersPath -map_metadata 1 -c copy (Join-Path $InputDirectory $OutputFile)
+}
+finally {
+    Remove-Item -LiteralPath $concatListPath, $chaptersPath -ErrorAction SilentlyContinue
+}
